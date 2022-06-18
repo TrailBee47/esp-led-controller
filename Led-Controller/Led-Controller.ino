@@ -3,10 +3,11 @@
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <Update.h>
+#include "credentials.h"
 
 const char* host = "esp32";
-const char* ssid = "******";
-const char* password = "******";
+const char* ssid = WIFI_SSID;
+const char* password = WIFI_PASSWD;
 
 WebServer server(80);
 
