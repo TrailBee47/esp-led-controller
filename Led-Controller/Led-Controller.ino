@@ -1,11 +1,22 @@
 #include <WiFi.h>
-#include <WiFiClient.h>
-#include <WebServer.h>
+//#include <WiFiClient.h>
+//#include <WebServer.h>
 #include <ESPmDNS.h>
 #include <Update.h>
 #include "credentials.h"
 #include "SPIFFS.h"
+#include "ledBuffer.h"
+#include "pages.h"
 
+//shifting to async web server
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <SPIFFSEditor.h>
+
+// SKETCH BEGIN
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
+AsyncEventSource events("/events");
 
 #define FILESYSTEM SPIFFS
 // You only need to format the filesystem once
@@ -22,8 +33,11 @@
 const char* host = "esp32";
 const char* ssid = WIFI_SSID;
 const char* password = WIFI_PASSWD;
+const char * hostName = "esp-async";
+const char* http_username = "admin";
+const char* http_password = "admin";
 
-WebServer server(80);
+
 
 String processor(const String& var)
 {
@@ -65,100 +79,82 @@ void setup(void) {
   }
   Serial.println("mDNS responder started");
   /*return index page which is stored in serverIndex */
-  server.on("/", HTTP_GET, [](){
-     if (!handleFileRead("/loginIndex.html")) {
-      server.send(404, "text/plain", "FileNotFound");
-    }
-  });
-  //called when the url is not defined here
-  //use it to load content from FILESYSTEM
-  server.onNotFound([]() {
-    if (!handleFileRead(server.uri())) {
-      server.send(404, "text/plain", "FileNotFound");
-    }
-  });
   
-  /*handling uploading firmware file */
-  server.on("/update", HTTP_POST, []() {
-    server.sendHeader("Connection", "close");
-    server.send(200, "text/plain", (Update.hasError()) ? "FAIL" : "OK");
-    ESP.restart();
-  }, []() {
-    HTTPUpload& upload = server.upload();
-    if (upload.status == UPLOAD_FILE_START) {
-      Serial.printf("Update: %s\n", upload.filename.c_str());
-      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) { //start with max available size
-        Update.printError(Serial);
-      }
-    } else if (upload.status == UPLOAD_FILE_WRITE) {
-      /* flashing firmware to ESP*/
-      if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-        Update.printError(Serial);
-      }
-    } else if (upload.status == UPLOAD_FILE_END) {
-      if (Update.end(true)) { //true to set the size to the current progress
-        Serial.printf("Update Success: %u\nRebooting...\n", upload.totalSize);
-      } else {
-        Update.printError(Serial);
-      }
-    }
-  });
+  //on file request serve from storage
+//  server.serveStatic("/", SPIFFS, "/www/");
   
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send(200, "text/plain", "Hello, world");
+    });
+//  server.on("/index", HTTP_GET, [](AsyncWebServerRequest *request){
+//    request->send(200, "text/plain", index_html);
+//  });
+//
+//  server.on("/serverIndex", HTTP_GET, [](AsyncWebServerRequest *request){
+//    request->send(200, "text/plain", server_index_html);
+//  });
+  
+//  //called when the url is not defined here
+//  //use it to load content from FILESYSTEM
+//  server.onNotFound([](AsyncWebServerRequest *request){
+//    Serial.printf("NOT_FOUND: ");
+//    if(request->method() == HTTP_GET)
+//      Serial.printf("GET");
+//    else if(request->method() == HTTP_POST)
+//      Serial.printf("POST");
+//    else if(request->method() == HTTP_DELETE)
+//      Serial.printf("DELETE");
+//    else if(request->method() == HTTP_PUT)
+//      Serial.printf("PUT");
+//    else if(request->method() == HTTP_PATCH)
+//      Serial.printf("PATCH");
+//    else if(request->method() == HTTP_HEAD)
+//      Serial.printf("HEAD");
+//    else if(request->method() == HTTP_OPTIONS)
+//      Serial.printf("OPTIONS");
+//    else
+//      Serial.printf("UNKNOWN");
+//    Serial.printf(" http://%s%s\n", request->host().c_str(), request->url().c_str());
+//
+//    if(request->contentLength()){
+//      Serial.printf("_CONTENT_TYPE: %s\n", request->contentType().c_str());
+//      Serial.printf("_CONTENT_LENGTH: %u\n", request->contentLength());
+//    }
+//
+//    int headers = request->headers();
+//    int i;
+//    for(i=0;i<headers;i++){
+//      AsyncWebHeader* h = request->getHeader(i);
+//      Serial.printf("_HEADER[%s]: %s\n", h->name().c_str(), h->value().c_str());
+//    }
+//
+//    int params = request->params();
+//    for(i=0;i<params;i++){
+//      AsyncWebParameter* p = request->getParam(i);
+//      if(p->isFile()){
+//        Serial.printf("_FILE[%s]: %s, size: %u\n", p->name().c_str(), p->value().c_str(), p->size());
+//      } else if(p->isPost()){
+//        Serial.printf("_POST[%s]: %s\n", p->name().c_str(), p->value().c_str());
+//      } else {
+//        Serial.printf("_GET[%s]: %s\n", p->name().c_str(), p->value().c_str());
+//      }
+//    }
+//
+//    request->send(404);
+//  });
+  
+  server.onNotFound(notFound);
   server.begin();
 }
 
 void loop(void) {
-  server.handleClient();
+  ws.cleanupClients();
 }
 
-bool handleFileRead(String path) {
-  DBG_OUTPUT_PORT.println("handleFileRead: " + path);
-  if (path.endsWith("/")) {
-    path += "index.htm";
+void notFound(AsyncWebServerRequest *request) {
+    request->send(404, "text/plain", "Not found");
   }
-  String contentType = getContentType(path);
-  String pathWithGz = path + ".gz";
-  if (exists(pathWithGz) || exists(path)) {
-    if (exists(pathWithGz)) {
-      path += ".gz";
-    }
-    File file = FILESYSTEM.open(path, "r");
-    server.streamFile(file, contentType);
-    file.close();
-    return true;
-  }
-  return false;
-}
-String getContentType(String filename) {
-  if (server.hasArg("download")) {
-    return "application/octet-stream";
-  } else if (filename.endsWith(".htm")) {
-    return "text/html";
-  } else if (filename.endsWith(".html")) {
-    return "text/html";
-  } else if (filename.endsWith(".css")) {
-    return "text/css";
-  } else if (filename.endsWith(".js")) {
-    return "application/javascript";
-  } else if (filename.endsWith(".png")) {
-    return "image/png";
-  } else if (filename.endsWith(".gif")) {
-    return "image/gif";
-  } else if (filename.endsWith(".jpg")) {
-    return "image/jpeg";
-  } else if (filename.endsWith(".ico")) {
-    return "image/x-icon";
-  } else if (filename.endsWith(".xml")) {
-    return "text/xml";
-  } else if (filename.endsWith(".pdf")) {
-    return "application/x-pdf";
-  } else if (filename.endsWith(".zip")) {
-    return "application/x-zip";
-  } else if (filename.endsWith(".gz")) {
-    return "application/x-gzip";
-  }
-  return "text/plain";
-}
+  
 bool exists(String path){
   bool yes = false;
   File file = FILESYSTEM.open(path, "r");
